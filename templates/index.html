@@ -17,14 +17,14 @@
   button#startBtn:hover { background: #574fd6; }
   button#startBtn:disabled { background: #3a3a3a; cursor: not-allowed; color: #666; }
   #progress-wrap { margin-top: 1.5rem; display: none; }
-  #log { background: #111; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; height: 220px; overflow-y: auto; font-family: monospace; font-size: .78rem; line-height: 1.6; color: #ccc; }
+  #log { background: #111; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; height: 240px; overflow-y: auto; font-family: monospace; font-size: .78rem; line-height: 1.7; color: #ccc; }
   #log .ok   { color: #4caf82; }
   #log .warn { color: #f0a500; }
   #log .err  { color: #f44336; }
   #log .info { color: #888; }
-  #downloadBtn { display: none; width: 100%; margin-top: 1rem; padding: .75rem; background: #2e7d52; border: none; border-radius: 8px; color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background .2s; }
+  #downloadBtn { display: none; width: 100%; margin-top: 1rem; padding: .75rem; background: #2e7d52; border: none; border-radius: 8px; color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer; }
   #downloadBtn:hover { background: #245f3e; }
-  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #666; border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; margin-right: 6px; }
+  .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid #555; border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; margin-right: 6px; }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
@@ -52,6 +52,8 @@
 
 <script>
 let currentJobId = null;
+let pollInterval = null;
+let logIndex = 0;
 
 function startDownload() {
   const slug  = document.getElementById('slug').value.trim();
@@ -64,10 +66,12 @@ function startDownload() {
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span>Running...';
 
-  const log = document.getElementById('log');
-  log.innerHTML = '';
+  document.getElementById('log').innerHTML = '';
   document.getElementById('progress-wrap').style.display = 'block';
   document.getElementById('downloadBtn').style.display = 'none';
+  logIndex = 0;
+
+  if (pollInterval) clearInterval(pollInterval);
 
   fetch('/start', {
     method: 'POST',
@@ -76,45 +80,49 @@ function startDownload() {
   })
   .then(r => r.json())
   .then(data => {
-    if (data.error) { appendLog('err', data.error); return; }
+    if (data.error) { appendLog('err', data.error); resetBtn(); return; }
     currentJobId = data.job_id;
-    listenProgress(data.job_id);
-  });
+    // Poll every 1.5s
+    pollInterval = setInterval(() => poll(data.job_id), 1500);
+  })
+  .catch(e => { appendLog('err', 'Failed to start: ' + e); resetBtn(); });
 }
 
-function listenProgress(jobId) {
-  const es = new EventSource(`/progress/${jobId}`);
-  const log = document.getElementById('log');
+function poll(jobId) {
+  fetch(`/poll/${jobId}?after=${logIndex}`)
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) { appendLog('err', data.error); stopPolling(); return; }
 
-  es.onmessage = (e) => {
-    const msg = e.data;
-    if (msg.startsWith('DONE:')) {
-      const parts = msg.split(':');
-      appendLog('ok', `✅ Finished! ${parts[1]} chapters downloaded.`);
-      document.getElementById('downloadBtn').style.display = 'block';
-      const btn = document.getElementById('startBtn');
-      btn.disabled = false;
-      btn.textContent = 'Start Download';
-      es.close();
-    } else if (msg.startsWith('ERROR:')) {
-      appendLog('err', '❌ ' + msg.slice(6));
-      const btn = document.getElementById('startBtn');
-      btn.disabled = false;
-      btn.textContent = 'Start Download';
-      es.close();
-    } else if (msg.startsWith('✓')) {
-      appendLog('ok', msg);
-    } else if (msg.startsWith('⚠')) {
-      appendLog('warn', msg);
-    } else {
-      appendLog('info', msg);
-    }
-  };
+      (data.lines || []).forEach(line => {
+        if (line.startsWith('✓'))       appendLog('ok',   line);
+        else if (line.startsWith('⚠'))  appendLog('warn', line);
+        else if (line.startsWith('❌'))  appendLog('err',  line);
+        else                            appendLog('info', line);
+      });
+      logIndex += (data.lines || []).length;
 
-  es.onerror = () => {
-    appendLog('err', 'Connection lost.');
-    es.close();
-  };
+      if (data.done) {
+        stopPolling();
+        resetBtn();
+        if (data.zip_name) {
+          document.getElementById('downloadBtn').style.display = 'block';
+        }
+      }
+    })
+    .catch(() => {
+      // silently retry on network blip
+    });
+}
+
+function stopPolling() {
+  if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+}
+
+function resetBtn() {
+  const btn = document.getElementById('startBtn');
+  btn.disabled = false;
+  btn.textContent = 'Start Download';
 }
 
 function appendLog(cls, msg) {
