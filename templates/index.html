@@ -13,17 +13,29 @@
   label { display: block; font-size: .8rem; color: #aaa; margin-bottom: .3rem; }
   input { width: 100%; background: #111; border: 1px solid #333; border-radius: 8px; padding: .65rem .85rem; color: #fff; font-size: .95rem; outline: none; margin-bottom: 1rem; transition: border .2s; }
   input:focus { border-color: #6c63ff; }
+
+  /* Format selector */
+  .fmt-label { font-size: .8rem; color: #aaa; margin-bottom: .5rem; }
+  .fmt-group { display: flex; gap: .6rem; margin-bottom: 1.2rem; }
+  .fmt-btn { flex: 1; padding: .55rem; border: 1px solid #333; border-radius: 8px; background: #111; color: #aaa; font-size: .9rem; cursor: pointer; transition: all .2s; text-align: center; }
+  .fmt-btn:hover { border-color: #6c63ff; color: #fff; }
+  .fmt-btn.active { border-color: #6c63ff; background: #1e1a3a; color: #a89fff; font-weight: 600; }
+  .fmt-btn.disabled { opacity: .35; cursor: not-allowed; }
+
   button#startBtn { width: 100%; padding: .75rem; background: #6c63ff; border: none; border-radius: 8px; color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background .2s; }
   button#startBtn:hover { background: #574fd6; }
   button#startBtn:disabled { background: #3a3a3a; cursor: not-allowed; color: #666; }
+
   #progress-wrap { margin-top: 1.5rem; display: none; }
   #log { background: #111; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; height: 240px; overflow-y: auto; font-family: monospace; font-size: .78rem; line-height: 1.7; color: #ccc; }
   #log .ok   { color: #4caf82; }
   #log .warn { color: #f0a500; }
   #log .err  { color: #f44336; }
   #log .info { color: #888; }
+
   #downloadBtn { display: none; width: 100%; margin-top: 1rem; padding: .75rem; background: #2e7d52; border: none; border-radius: 8px; color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer; }
   #downloadBtn:hover { background: #245f3e; }
+
   .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid #555; border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; margin-right: 6px; }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>
@@ -31,7 +43,7 @@
 <body>
 <div class="card">
   <h1>📖 NovelBuddy Downloader</h1>
-  <p class="sub">Downloads all chapters as .txt files in a ZIP</p>
+  <p class="sub">Downloads all chapters from novelbuddy.io</p>
 
   <label>Novel slug <span style="color:#555">(from the URL)</span></label>
   <input id="slug" type="text" placeholder="e.g. under-the-oak-tree"/>
@@ -42,18 +54,33 @@
   <label>First chapter slug <span style="color:#555">(leave blank for chapter-1)</span></label>
   <input id="first" type="text" placeholder="chapter-1"/>
 
+  <div class="fmt-label">Output format</div>
+  <div class="fmt-group">
+    <div class="fmt-btn active" data-fmt="txt" onclick="selectFmt(this)">📄 TXT (ZIP)</div>
+    <div class="fmt-btn {% if not docx_ok %}disabled{% endif %}" data-fmt="docx" onclick="selectFmt(this)">📝 DOCX</div>
+    <div class="fmt-btn {% if not pdf_ok %}disabled{% endif %}"  data-fmt="pdf"  onclick="selectFmt(this)">📕 PDF</div>
+  </div>
+
   <button id="startBtn" onclick="startDownload()">Start Download</button>
 
   <div id="progress-wrap">
     <div id="log"></div>
-    <button id="downloadBtn" onclick="triggerDownload()">⬇ Download ZIP</button>
+    <button id="downloadBtn" onclick="triggerDownload()">⬇ Download</button>
   </div>
 </div>
 
 <script>
 let currentJobId = null;
 let pollInterval = null;
-let logIndex = 0;
+let logIndex     = 0;
+let selectedFmt  = 'txt';
+
+function selectFmt(el) {
+  if (el.classList.contains('disabled')) return;
+  document.querySelectorAll('.fmt-btn').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+  selectedFmt = el.dataset.fmt;
+}
 
 function startDownload() {
   const slug  = document.getElementById('slug').value.trim();
@@ -76,13 +103,12 @@ function startDownload() {
   fetch('/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ slug, title, first })
+    body: JSON.stringify({ slug, title, first, format: selectedFmt })
   })
   .then(r => r.json())
   .then(data => {
     if (data.error) { appendLog('err', data.error); resetBtn(); return; }
     currentJobId = data.job_id;
-    // Poll every 1.5s
     pollInterval = setInterval(() => poll(data.job_id), 1500);
   })
   .catch(e => { appendLog('err', 'Failed to start: ' + e); resetBtn(); });
@@ -95,9 +121,9 @@ function poll(jobId) {
       if (data.error) { appendLog('err', data.error); stopPolling(); return; }
 
       (data.lines || []).forEach(line => {
-        if (line.startsWith('✓'))       appendLog('ok',   line);
+        if      (line.startsWith('✓'))  appendLog('ok',   line);
         else if (line.startsWith('⚠'))  appendLog('warn', line);
-        else if (line.startsWith('❌'))  appendLog('err',  line);
+        else if (line.startsWith('❌')) appendLog('err',  line);
         else                            appendLog('info', line);
       });
       logIndex += (data.lines || []).length;
@@ -105,14 +131,15 @@ function poll(jobId) {
       if (data.done) {
         stopPolling();
         resetBtn();
-        if (data.zip_name) {
-          document.getElementById('downloadBtn').style.display = 'block';
+        if (data.out_name) {
+          const ext = data.out_name.split('.').pop().toUpperCase();
+          const btn = document.getElementById('downloadBtn');
+          btn.textContent = `⬇ Download ${ext}`;
+          btn.style.display = 'block';
         }
       }
     })
-    .catch(() => {
-      // silently retry on network blip
-    });
+    .catch(() => { /* silent retry */ });
 }
 
 function stopPolling() {
