@@ -1,331 +1,169 @@
-"""
-novelbuddy.io — Web App Downloader
-Supports TXT (zip), DOCX, and PDF output formats.
-"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>NovelBuddy Downloader</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #0f0f0f; color: #e8e8e8; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+  .card { background: #1a1a1a; border: 1px solid #2e2e2e; border-radius: 16px; padding: 2rem; width: 100%; max-width: 520px; }
+  h1 { font-size: 1.4rem; margin-bottom: .25rem; color: #fff; }
+  p.sub { color: #888; font-size: .85rem; margin-bottom: 1.5rem; }
+  label { display: block; font-size: .8rem; color: #aaa; margin-bottom: .3rem; }
+  input { width: 100%; background: #111; border: 1px solid #333; border-radius: 8px; padding: .65rem .85rem; color: #fff; font-size: .95rem; outline: none; margin-bottom: 1rem; transition: border .2s; }
+  input:focus { border-color: #6c63ff; }
 
-import re
-import os
-import json
-import time
-import html as html_lib
-import zipfile
-import threading
-import uuid
-from urllib.request import urlopen, Request
-from flask import Flask, render_template, request, jsonify, send_file
+  /* Format selector */
+  .fmt-label { font-size: .8rem; color: #aaa; margin-bottom: .5rem; }
+  .fmt-group { display: flex; gap: .6rem; margin-bottom: 1.2rem; }
+  .fmt-btn { flex: 1; padding: .55rem; border: 1px solid #333; border-radius: 8px; background: #111; color: #aaa; font-size: .9rem; cursor: pointer; transition: all .2s; text-align: center; }
+  .fmt-btn:hover { border-color: #6c63ff; color: #fff; }
+  .fmt-btn.active { border-color: #6c63ff; background: #1e1a3a; color: #a89fff; font-weight: 600; }
+  .fmt-btn.disabled { opacity: .35; cursor: not-allowed; }
 
-# ── Optional format libraries ─────────────────────────────────────────────────
-try:
-    from docx import Document as DocxDocument
-    from docx.shared import Pt, RGBColor
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    DOCX_OK = True
-except ImportError:
-    DOCX_OK = False
+  button#startBtn { width: 100%; padding: .75rem; background: #6c63ff; border: none; border-radius: 8px; color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background .2s; }
+  button#startBtn:hover { background: #574fd6; }
+  button#startBtn:disabled { background: #3a3a3a; cursor: not-allowed; color: #666; }
 
-try:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import cm
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-    from reportlab.lib.enums import TA_LEFT, TA_CENTER
-    PDF_OK = True
-except ImportError:
-    PDF_OK = False
+  #progress-wrap { margin-top: 1.5rem; display: none; }
+  #log { background: #111; border: 1px solid #2a2a2a; border-radius: 8px; padding: 1rem; height: 240px; overflow-y: auto; font-family: monospace; font-size: .78rem; line-height: 1.7; color: #ccc; }
+  #log .ok   { color: #4caf82; }
+  #log .warn { color: #f0a500; }
+  #log .err  { color: #f44336; }
+  #log .info { color: #888; }
 
-app = Flask(__name__)
-DOWNLOAD_DIR = "downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+  #downloadBtn { display: none; width: 100%; margin-top: 1rem; padding: .75rem; background: #2e7d52; border: none; border-radius: 8px; color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer; }
+  #downloadBtn:hover { background: #245f3e; }
 
-BASE_URL   = "https://novelbuddy.io"
-DELAY      = 0.6
-MAX_ERRORS = 5
+  .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid #555; border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>📖 NovelBuddy Downloader</h1>
+  <p class="sub">Downloads all chapters from novelbuddy.io</p>
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "application/json, */*",
+  <label>Novel slug <span style="color:#555">(from the URL)</span></label>
+  <input id="slug" type="text" placeholder="e.g. under-the-oak-tree"/>
+
+  <label>Novel title</label>
+  <input id="title" type="text" placeholder="e.g. Under the Oak Tree"/>
+
+  <label>First chapter slug <span style="color:#555">(leave blank for chapter-1)</span></label>
+  <input id="first" type="text" placeholder="chapter-1"/>
+
+  <div class="fmt-label">Output format</div>
+  <div class="fmt-group">
+    <div class="fmt-btn active" data-fmt="txt" onclick="selectFmt(this)">📄 TXT (ZIP)</div>
+    <div class="fmt-btn {% if not docx_ok %}disabled{% endif %}" data-fmt="docx" onclick="selectFmt(this)">📝 DOCX</div>
+    <div class="fmt-btn {% if not pdf_ok %}disabled{% endif %}"  data-fmt="pdf"  onclick="selectFmt(this)">📕 PDF</div>
+  </div>
+
+  <button id="startBtn" onclick="startDownload()">Start Download</button>
+
+  <div id="progress-wrap">
+    <div id="log"></div>
+    <button id="downloadBtn" onclick="triggerDownload()">⬇ Download</button>
+  </div>
+</div>
+
+<script>
+let currentJobId = null;
+let pollInterval = null;
+let logIndex     = 0;
+let selectedFmt  = 'txt';
+
+function selectFmt(el) {
+  if (el.classList.contains('disabled')) return;
+  document.querySelectorAll('.fmt-btn').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+  selectedFmt = el.dataset.fmt;
 }
 
-jobs = {}
+function startDownload() {
+  const slug  = document.getElementById('slug').value.trim();
+  const title = document.getElementById('title').value.trim();
+  const first = document.getElementById('first').value.trim() || 'chapter-1';
 
+  if (!slug || !title) { alert('Please enter both slug and title.'); return; }
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+  const btn = document.getElementById('startBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Running...';
 
-def fetch_raw(url):
-    req = Request(url, headers=HEADERS)
-    with urlopen(req, timeout=30) as r:
-        return r.read().decode("utf-8", errors="replace")
+  document.getElementById('log').innerHTML = '';
+  document.getElementById('progress-wrap').style.display = 'block';
+  document.getElementById('downloadBtn').style.display = 'none';
+  logIndex = 0;
 
-def fetch_json(url):
-    return json.loads(fetch_raw(url))
+  if (pollInterval) clearInterval(pollInterval);
 
-def get_build_id(slug):
-    html = fetch_raw(f"{BASE_URL}/{slug}")
-    for pat in [r'"buildId"\s*:\s*"([^"]+)"',
-                r'/_next/static/([^/]+)/_buildManifest\.js']:
-        m = re.search(pat, html)
-        if m:
-            return m.group(1)
-    raise RuntimeError("Could not detect build ID.")
+  fetch('/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slug, title, first, format: selectedFmt })
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) { appendLog('err', data.error); resetBtn(); return; }
+    currentJobId = data.job_id;
+    pollInterval = setInterval(() => poll(data.job_id), 1500);
+  })
+  .catch(e => { appendLog('err', 'Failed to start: ' + e); resetBtn(); });
+}
 
-def fetch_props(build_id, slug, ch_slug):
-    url = f"{BASE_URL}/_next/data/{build_id}/{slug}/{ch_slug}.json"
-    try:
-        return fetch_json(url).get("pageProps", {})
-    except Exception:
-        return None
+function poll(jobId) {
+  fetch(`/poll/${jobId}?after=${logIndex}`)
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) { appendLog('err', data.error); stopPolling(); return; }
 
-def html_to_text(raw):
-    text = html_lib.unescape(raw)
-    text = re.sub(r'<br\s*/?>', '\n',   text, flags=re.IGNORECASE)
-    text = re.sub(r'</p>',      '\n\n', text, flags=re.IGNORECASE)
-    text = re.sub(r'</div>',    '\n',   text, flags=re.IGNORECASE)
-    text = re.sub(r'<[^>]+>',   '',     text)
-    text = re.sub(r'\n{3,}',    '\n\n', text)
-    return text.strip()
+      (data.lines || []).forEach(line => {
+        if      (line.startsWith('✓'))  appendLog('ok',   line);
+        else if (line.startsWith('⚠'))  appendLog('warn', line);
+        else if (line.startsWith('❌')) appendLog('err',  line);
+        else                            appendLog('info', line);
+      });
+      logIndex += (data.lines || []).length;
 
-def safe_filename(slug, title):
-    m = re.search(r'chapter-(\d+)', slug)
-    num = int(m.group(1)) if m else 0
-    safe = re.sub(r'[\\/:*?"<>|]', '', title)
-    safe = re.sub(r'\s+', '_', safe.strip())[:60]
-    return f"{num:04d}_{safe}"
-
-def parse_ch_num(name, slug):
-    for pat, src in [(r'[Cc]hapter\s*(\d+)', name), (r'chapter-(\d+)', slug)]:
-        m = re.search(pat, src)
-        if m:
-            return int(m.group(1))
-    return None
-
-
-# ── Format builders ───────────────────────────────────────────────────────────
-
-def build_zip(job_dir, chapters, out_path):
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fname, _ in chapters:
-            zf.write(os.path.join(job_dir, fname + ".txt"), fname + ".txt")
-
-
-def build_docx(novel_title, chapters, out_path, log=None):
-    doc = DocxDocument()
-    h = doc.add_heading(novel_title, level=0)
-    h.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    doc.add_page_break()
-    total = len(chapters)
-    for i, (fname, (ch_name, body)) in enumerate(chapters, 1):
-        doc.add_heading(ch_name, level=1)
-        for para in body.split("\n\n"):
-            para = para.strip()
-            if para:
-                p = doc.add_paragraph(para)
-                p.style.font.size = Pt(11)
-        doc.add_page_break()
-        if log and i % 25 == 0:
-            log(f"✓ Building DOCX … {i}/{total} chapters")
-    log and log(f"✓ Building DOCX … {total}/{total} — saving file …")
-    doc.save(out_path)
-
-
-def build_pdf(novel_title, chapters, out_path, log=None):
-    doc = SimpleDocTemplate(
-        out_path, pagesize=A4,
-        leftMargin=2*cm, rightMargin=2*cm,
-        topMargin=2*cm, bottomMargin=2*cm
-    )
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("Title2", parent=styles["Title"],
-                                 fontSize=20, spaceAfter=20, alignment=TA_CENTER)
-    ch_style    = ParagraphStyle("ChHead", parent=styles["Heading1"],
-                                 fontSize=13, spaceBefore=10, spaceAfter=8)
-    body_style  = ParagraphStyle("Body2", parent=styles["Normal"],
-                                 fontSize=10, leading=16, spaceAfter=6)
-
-    log and log("Building PDF story …")
-    story = [Paragraph(novel_title, title_style), PageBreak()]
-    total = len(chapters)
-    for i, (_, (ch_name, body)) in enumerate(chapters, 1):
-        story.append(Paragraph(ch_name, ch_style))
-        for para in body.split("\n\n"):
-            para = para.strip()
-            if para:
-                para = para.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                story.append(Paragraph(para, body_style))
-        story.append(PageBreak())
-        if log and i % 25 == 0:
-            log(f"✓ Building PDF … {i}/{total} chapters")
-    log and log(f"✓ Building PDF … {total}/{total} — rendering pages …")
-    doc.build(story)
-    log and log("✓ PDF render complete.")
-
-
-# ── Background job ────────────────────────────────────────────────────────────
-
-def download_job(job_id, novel_slug, novel_title, first_slug, fmt):
-    job = jobs[job_id]
-
-    def log(msg):
-        job["log"].append(msg)
-
-    try:
-        log(f"Starting: {novel_title}  [{fmt.upper()}]")
-        build_id = get_build_id(novel_slug)
-        log(f"Build ID: {build_id}")
-
-        props = fetch_props(build_id, novel_slug, first_slug)
-        if props is None:
-            build_id = get_build_id(novel_slug)
-            props = fetch_props(build_id, novel_slug, first_slug)
-        if props is None:
-            raise RuntimeError("Cannot fetch first chapter. Check the slug.")
-
-        job_dir = os.path.join(DOWNLOAD_DIR, job_id)
-        os.makedirs(job_dir, exist_ok=True)
-
-        current_slug    = first_slug
-        consecutive_err = 0
-        total_dl        = 0
-        # list of (base_filename, (ch_name, body_text))
-        chapters = []
-
-        while current_slug:
-            if props is None:
-                props = fetch_props(build_id, novel_slug, current_slug)
-
-            if props is None:
-                consecutive_err += 1
-                log(f"⚠ Failed ({consecutive_err}/{MAX_ERRORS}): {current_slug}")
-                if consecutive_err >= MAX_ERRORS:
-                    log("Too many errors — stopping.")
-                    break
-                m = re.match(r'(chapter-)(\d+)', current_slug)
-                if m:
-                    current_slug = f"chapter-{int(m.group(2)) + 1}"
-                    props = None
-                    continue
-                break
-
-            consecutive_err = 0
-            ch        = props.get("initialChapter", {})
-            next_info = props.get("nextChapter") or {}
-            ch_slug   = ch.get("slug", current_slug)
-            ch_name   = ch.get("name", current_slug)
-            ch_words  = ch.get("word_count", "")
-            ch_num    = parse_ch_num(ch_name, ch_slug)
-            raw       = ch.get("content", "")
-            body      = html_to_text(raw) if raw else "(No content)"
-            fname     = safe_filename(ch_slug, ch_name)
-
-            # Always save txt (used by zip; also needed for docx/pdf assembly)
-            with open(os.path.join(job_dir, fname + ".txt"), "w", encoding="utf-8") as f:
-                f.write(body + "\n")
-
-            total_dl += 1
-            chapters.append((fname, (ch_name, body)))
-            log(f"✓ [{ch_num or '?'}] {ch_name} ({ch_words} words)")
-
-            next_slug = next_info.get("slug", "") if isinstance(next_info, dict) else ""
-            if not next_slug or next_slug == ch_slug:
-                log("Chain complete — no more chapters.")
-                break
-
-            current_slug = next_slug
-            props = None
-            time.sleep(DELAY)
-
-        # Build output file
-        slug_safe = re.sub(r'[^\w\-]', '_', novel_slug)
-        log(f"Building {fmt.upper()} file …")
-
-        if fmt == "txt":
-            out_name = f"{slug_safe}.zip"
-            out_path = os.path.join(DOWNLOAD_DIR, out_name)
-            build_zip(job_dir, chapters, out_path)
-
-        elif fmt == "docx":
-            out_name = f"{slug_safe}.docx"
-            out_path = os.path.join(DOWNLOAD_DIR, out_name)
-            build_docx(novel_title, chapters, out_path)
-
-        elif fmt == "pdf":
-            out_name = f"{slug_safe}.pdf"
-            out_path = os.path.join(DOWNLOAD_DIR, out_name)
-            build_pdf(novel_title, chapters, out_path)
-
-        # Cleanup txt files
-        for fname, _ in chapters:
-            try: os.remove(os.path.join(job_dir, fname + ".txt"))
-            except: pass
-        try: os.rmdir(job_dir)
-        except: pass
-
-        job["out_name"] = out_name
-        job["total"]    = total_dl
-        log(f"✅ Done! {total_dl} chapters — ready to download.")
-
-    except Exception as e:
-        job["error"] = str(e)
-        log(f"❌ Error: {e}")
-    finally:
-        job["done"] = True
-
-
-# ── Routes ────────────────────────────────────────────────────────────────────
-
-@app.route("/")
-def index():
-    return render_template("index.html",
-                           docx_ok=DOCX_OK, pdf_ok=PDF_OK)
-
-@app.route("/start", methods=["POST"])
-def start():
-    data        = request.json
-    novel_slug  = data.get("slug", "").strip()
-    novel_title = data.get("title", "").strip()
-    first_slug  = data.get("first", "chapter-1").strip() or "chapter-1"
-    fmt         = data.get("format", "txt").strip().lower()
-
-    if not novel_slug or not novel_title:
-        return jsonify({"error": "Slug and title are required."}), 400
-    if fmt == "docx" and not DOCX_OK:
-        return jsonify({"error": "python-docx not installed on server."}), 400
-    if fmt == "pdf" and not PDF_OK:
-        return jsonify({"error": "reportlab not installed on server."}), 400
-
-    job_id = str(uuid.uuid4())[:8]
-    jobs[job_id] = {"log": [], "done": False, "out_name": None, "error": None, "total": 0}
-
-    threading.Thread(target=download_job,
-                     args=(job_id, novel_slug, novel_title, first_slug, fmt),
-                     daemon=True).start()
-    return jsonify({"job_id": job_id})
-
-
-@app.route("/poll/<job_id>")
-def poll(job_id):
-    if job_id not in jobs:
-        return jsonify({"error": "Not found"}), 404
-    job   = jobs[job_id]
-    after = int(request.args.get("after", 0))
-    return jsonify({
-        "lines":    job["log"][after:],
-        "done":     job["done"],
-        "out_name": job["out_name"],
-        "total":    job["total"],
-        "error":    job["error"],
+      if (data.done) {
+        stopPolling();
+        resetBtn();
+        if (data.out_name) {
+          const ext = data.out_name.split('.').pop().toUpperCase();
+          const btn = document.getElementById('downloadBtn');
+          btn.textContent = `⬇ Download ${ext}`;
+          btn.style.display = 'block';
+        }
+      }
     })
+    .catch(() => { /* silent retry */ });
+}
 
+function stopPolling() {
+  if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+}
 
-@app.route("/download/<job_id>")
-def download(job_id):
-    if job_id not in jobs:
-        return "Not found", 404
-    job = jobs[job_id]
-    if not job.get("out_name"):
-        return "Not ready", 400
-    out_path = os.path.join(DOWNLOAD_DIR, job["out_name"])
-    return send_file(out_path, as_attachment=True, download_name=job["out_name"])
+function resetBtn() {
+  const btn = document.getElementById('startBtn');
+  btn.disabled = false;
+  btn.textContent = 'Start Download';
+}
 
+function appendLog(cls, msg) {
+  const log = document.getElementById('log');
+  const line = document.createElement('div');
+  line.className = cls;
+  line.textContent = msg;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
 
-if __name__ == "__main__":
-    app.run(debug=True, threaded=True)
+function triggerDownload() {
+  if (currentJobId) window.location.href = `/download/${currentJobId}`;
+}
+</script>
+</body>
+</html>
