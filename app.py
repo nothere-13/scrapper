@@ -127,7 +127,7 @@ def build_docx(novel_title, chapters, out_path, log=None):
     doc.save(out_path)
 
 
-def build_pdf(novel_title, chapters, out_path):
+def build_pdf(novel_title, chapters, out_path, log=None):
     doc = SimpleDocTemplate(
         out_path, pagesize=A4,
         leftMargin=2*cm, rightMargin=2*cm,
@@ -141,17 +141,22 @@ def build_pdf(novel_title, chapters, out_path):
     body_style  = ParagraphStyle("Body2", parent=styles["Normal"],
                                  fontSize=10, leading=16, spaceAfter=6)
 
+    log and log("Building PDF story …")
     story = [Paragraph(novel_title, title_style), PageBreak()]
-    for _, (ch_name, body) in chapters:
+    total = len(chapters)
+    for i, (_, (ch_name, body)) in enumerate(chapters, 1):
         story.append(Paragraph(ch_name, ch_style))
         for para in body.split("\n\n"):
             para = para.strip()
             if para:
-                # Escape XML special chars for reportlab
                 para = para.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 story.append(Paragraph(para, body_style))
         story.append(PageBreak())
+        if log and i % 25 == 0:
+            log(f"✓ Building PDF … {i}/{total} chapters")
+    log and log(f"✓ Building PDF … {total}/{total} — rendering pages …")
     doc.build(story)
+    log and log("✓ PDF render complete.")
 
 
 # ── Background job ────────────────────────────────────────────────────────────
@@ -240,12 +245,12 @@ def download_job(job_id, novel_slug, novel_title, first_slug, fmt):
         elif fmt == "docx":
             out_name = f"{slug_safe}.docx"
             out_path = os.path.join(DOWNLOAD_DIR, out_name)
-            build_docx(novel_title, chapters, out_path)
+            build_docx(novel_title, chapters, out_path, log)
 
         elif fmt == "pdf":
             out_name = f"{slug_safe}.pdf"
             out_path = os.path.join(DOWNLOAD_DIR, out_name)
-            build_pdf(novel_title, chapters, out_path)
+            build_pdf(novel_title, chapters, out_path, log)
 
         # Cleanup txt files
         for fname, _ in chapters:
