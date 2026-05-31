@@ -107,12 +107,13 @@ def build_zip(job_dir, chapters, out_path):
             zf.write(os.path.join(job_dir, fname + ".txt"), fname + ".txt")
 
 
-def build_docx(novel_title, chapters, out_path):
+def build_docx(novel_title, chapters, out_path, log=None):
     doc = DocxDocument()
     h = doc.add_heading(novel_title, level=0)
     h.alignment = WD_ALIGN_PARAGRAPH.CENTER
     doc.add_page_break()
-    for fname, (ch_name, body) in chapters:
+    total = len(chapters)
+    for i, (fname, (ch_name, body)) in enumerate(chapters, 1):
         doc.add_heading(ch_name, level=1)
         for para in body.split("\n\n"):
             para = para.strip()
@@ -120,6 +121,9 @@ def build_docx(novel_title, chapters, out_path):
                 p = doc.add_paragraph(para)
                 p.style.font.size = Pt(11)
         doc.add_page_break()
+        if log and i % 25 == 0:
+            log(f"✓ Building DOCX … {i}/{total} chapters")
+    log and log(f"✓ Building DOCX … {total}/{total} — saving file …")
     doc.save(out_path)
 
 
