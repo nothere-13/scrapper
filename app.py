@@ -1,6 +1,6 @@
 """
 novelbuddy.io — Web App Downloader
-Flask backend with SSE progress streaming
+Uses polling instead of SSE for broad hosting compatibility.
 """
 
 import re
@@ -10,9 +10,9 @@ import time
 import html as html_lib
 import zipfile
 import threading
+import uuid
 from urllib.request import urlopen, Request
-from urllib.error import HTTPError
-from flask import Flask, render_template, request, Response, send_file, jsonify
+from flask import Flask, render_template, request, jsonify, send_file
 
 app = Flask(__name__)
 DOWNLOAD_DIR = "downloads"
@@ -27,9 +27,11 @@ HEADERS = {
     "Accept": "application/json, */*",
 }
 
-# job_id -> {"status", "log": [], "zip_path", "done", "error"}
+# job_id -> { log:[], done:bool, zip_name:str|None, error:str|None }
 jobs = {}
 
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def fetch_raw(url):
     req = Request(url, headers=HEADERS)
@@ -52,7 +54,7 @@ def fetch_props(build_id, slug, ch_slug):
     url = f"{BASE_URL}/_next/data/{build_id}/{slug}/{ch_slug}.json"
     try:
         return fetch_json(url).get("pageProps", {})
-    except Exception as e:
+    except Exception:
         return None
 
 def html_to_text(raw):
@@ -79,17 +81,18 @@ def parse_ch_num(name, slug):
     return None
 
 
+# ── Background job ────────────────────────────────────────────────────────────
+
 def download_job(job_id, novel_slug, novel_title, first_slug):
     job = jobs[job_id]
-    log = job["log"]
 
-    def emit(msg):
-        log.append(msg)
+    def log(msg):
+        job["log"].append(msg)
 
     try:
-        emit(f"Starting: {novel_title}")
+        log(f"Starting: {novel_title}")
         build_id = get_build_id(novel_slug)
-        emit(f"Build ID: {build_id}")
+        log(f"Build ID: {build_id}")
 
         props = fetch_props(build_id, novel_slug, first_slug)
         if props is None:
@@ -98,7 +101,6 @@ def download_job(job_id, novel_slug, novel_title, first_slug):
         if props is None:
             raise RuntimeError("Cannot fetch first chapter. Check the slug.")
 
-        # temp folder for this job
         job_dir = os.path.join(DOWNLOAD_DIR, job_id)
         os.makedirs(job_dir, exist_ok=True)
 
@@ -113,9 +115,9 @@ def download_job(job_id, novel_slug, novel_title, first_slug):
 
             if props is None:
                 consecutive_err += 1
-                emit(f"⚠ Failed ({consecutive_err}/{MAX_ERRORS}): {current_slug}")
+                log(f"⚠ Failed ({consecutive_err}/{MAX_ERRORS}): {current_slug}")
                 if consecutive_err >= MAX_ERRORS:
-                    emit("Too many errors — stopping.")
+                    log("Too many errors — stopping.")
                     break
                 m = re.match(r'(chapter-)(\d+)', current_slug)
                 if m:
@@ -142,39 +144,44 @@ def download_job(job_id, novel_slug, novel_title, first_slug):
 
             total_dl += 1
             chapters.append(fname)
-            emit(f"✓ [{ch_num or '?'}] {ch_name} ({ch_words} words)")
+            log(f"✓ [{ch_num or '?'}] {ch_name} ({ch_words} words)")
 
             next_slug = next_info.get("slug", "") if isinstance(next_info, dict) else ""
             if not next_slug or next_slug == ch_slug:
-                emit("Chain complete — no more chapters.")
+                log("Chain complete — no more chapters.")
                 break
 
             current_slug = next_slug
             props = None
             time.sleep(DELAY)
 
-        # zip everything
+        # Zip all chapters
         zip_name = f"{re.sub(r'[^\\w\\-]', '_', novel_slug)}.zip"
         zip_path = os.path.join(DOWNLOAD_DIR, zip_name)
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for fname in chapters:
                 zf.write(os.path.join(job_dir, fname), fname)
 
-        # cleanup txt files
+        # Cleanup
         for fname in chapters:
-            os.remove(os.path.join(job_dir, fname))
-        os.rmdir(job_dir)
+            try: os.remove(os.path.join(job_dir, fname))
+            except: pass
+        try: os.rmdir(job_dir)
+        except: pass
 
-        job["zip_path"] = zip_path
         job["zip_name"] = zip_name
         job["total"]    = total_dl
-        emit(f"DONE:{total_dl}:{zip_name}")
+        log(f"✅ Done! {total_dl} chapters downloaded.")
 
     except Exception as e:
-        emit(f"ERROR:{e}")
+        job["error"] = str(e)
+        log(f"❌ Error: {e}")
+
     finally:
         job["done"] = True
 
+
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
@@ -191,36 +198,30 @@ def start():
     if not novel_slug or not novel_title:
         return jsonify({"error": "Slug and title are required."}), 400
 
-    import uuid
     job_id = str(uuid.uuid4())[:8]
-    jobs[job_id] = {"log": [], "done": False, "zip_path": None}
+    jobs[job_id] = {"log": [], "done": False, "zip_name": None, "error": None, "total": 0}
 
-    t = threading.Thread(target=download_job,
-                         args=(job_id, novel_slug, novel_title, first_slug),
-                         daemon=True)
-    t.start()
+    threading.Thread(target=download_job,
+                     args=(job_id, novel_slug, novel_title, first_slug),
+                     daemon=True).start()
+
     return jsonify({"job_id": job_id})
 
 
-@app.route("/progress/<job_id>")
-def progress(job_id):
-    """SSE endpoint — streams log lines to the browser."""
+@app.route("/poll/<job_id>")
+def poll(job_id):
+    """Return all log lines since `after` index + done/zip status."""
     if job_id not in jobs:
-        return "Not found", 404
-
-    def stream():
-        sent = 0
-        while True:
-            job = jobs[job_id]
-            log = job["log"]
-            while sent < len(log):
-                yield f"data: {log[sent]}\n\n"
-                sent += 1
-            if job["done"]:
-                break
-            time.sleep(0.3)
-
-    return Response(stream(), mimetype="text/event-stream")
+        return jsonify({"error": "Not found"}), 404
+    job   = jobs[job_id]
+    after = int(request.args.get("after", 0))
+    return jsonify({
+        "lines":    job["log"][after:],
+        "done":     job["done"],
+        "zip_name": job["zip_name"],
+        "total":    job["total"],
+        "error":    job["error"],
+    })
 
 
 @app.route("/download/<job_id>")
@@ -228,11 +229,10 @@ def download(job_id):
     if job_id not in jobs:
         return "Not found", 404
     job = jobs[job_id]
-    if not job.get("zip_path"):
+    if not job.get("zip_name"):
         return "Not ready", 400
-    return send_file(job["zip_path"],
-                     as_attachment=True,
-                     download_name=job["zip_name"])
+    zip_path = os.path.join(DOWNLOAD_DIR, job["zip_name"])
+    return send_file(zip_path, as_attachment=True, download_name=job["zip_name"])
 
 
 if __name__ == "__main__":
